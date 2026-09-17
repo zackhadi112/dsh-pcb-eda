@@ -1,0 +1,21 @@
+# DSH bundle patch: inserts the Huaqiu PCB FreeRouting autoroute plugin.
+# `hqEdge` is REQUIRED — the edge-bridge (HOST) provides it and its `baseUrl`
+# is the loopback HQ Edge endpoint the KiCad board tools fetch from.
+# `tools` is the DSH node tool registry.
+# `systemPrompt` is the DSH system-prompt section registry.
+# `webServer` is the DSH host web-server for the run status/output HTTP API.
+# `jobs` is the DSH background-job runner for long routing runs.
+- insert:
+    - id: huaqiu-dsh-tool-freerouting
+      name: '@huaqiu/dsh-tool-freerouting'
+      inject: ['hqEdge', 'tools', 'systemPrompt', 'webServer', 'jobs']
+      config:
+        freeroutingBaseUrl: http://127.0.0.1:37864
+        routePrefix: /pcb-freerouting
+        realtime: true
+        drawtimeSec: 5
+        pollIntervalMs: 2000
+        pollTimeoutMs: 900000
+        requestTimeoutMs: 120000
+        resultTtlMs: 3600000
+        maxPendingRuns: 4
