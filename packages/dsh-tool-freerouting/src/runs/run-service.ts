@@ -1,7 +1,3 @@
-import { writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
 import type { Context } from '@deepseek-ai/cordis';
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs';
 
@@ -9,7 +5,6 @@ import type { FreeroutingClient, RouteProgress } from '../proxy/freerouting-clie
 import type { KicadUpstreamClient } from '../proxy/kicad-upstream-interface.js';
 import { runError, UpstreamServiceError } from '../proxy/upstream-errors.js';
 import type { RouteParameters, RunOutput, RunRecord, RoutingResult } from './contracts.js';
-import { assessImportGeometry } from './import-geometry.js';
 import type { FreeroutingLauncher } from './launcher.js';
 import type { RunStore } from './run-store.js';
 import {
@@ -321,9 +316,7 @@ export class RunService {
           );
           try {
             // Import intermediate SES directly via hq-edge (base64, no file path).
-            // skipNets (pour-only, e.g. GND) ride along so the Bridge also clears their
-            // stale copper before every realtime frame, not just the final import.
-            await this.bridge.importSession(sesBase64, requested.skipNets, signal);
+            await this.bridge.importSession(sesBase64, signal);
           } catch (cause) {
             if (signal.aborted || (cause instanceof Error && cause.name === 'AbortError')) {
               throw cause;
@@ -338,7 +331,7 @@ export class RunService {
 
     // 3. Import the authoritative final session via hq-edge (base64 exchange).
     const sesBytes = Buffer.from(outcome.sesBase64, 'base64');
-    const imported = await this.bridge.importSession(outcome.sesBase64, requested.skipNets, signal);
+    const imported = await this.bridge.importSession(outcome.sesBase64, signal);
 
     // Net-level routed/unrouted split.
     const ses = countSes(sesBytes.toString('utf8'));
@@ -351,36 +344,16 @@ export class RunService {
     sample = { percentage: 100, state: 'IMPORTING', ticks: sample?.ticks ?? 0 };
     publish();
 
-    // 4. Let the Bridge confirm the imported tracks stayed inside the board outline.
-    const verdict = assessImportGeometry(imported.geometry);
-    if (verdict.level === 'reject') {
-      const reverted = await this.bridge
-        .revertSession(signal)
-        .then(() => true)
-        .catch(() => false);
-      throw new UpstreamServiceError(
-        'ROUTING_OUTSIDE_BOARD',
-        502,
-        `${verdict.message}；${
-          reverted
-            ? '已撤销本次导入，板子恢复原状，请更新 KiCad 里的 FreeRouting 插件后重试'
-            : '撤销导入失败，请在 KiCad 中手动删除板框外的走线'
-        }`,
-      );
-    }
-
+    // 4. Check if the import succeeded (geometry check removed - hq-edge doesn't return geometry data).
     const warnings: string[] = [];
-    if (verdict.message !== undefined) {
-      warnings.push(verdict.message);
-    }
     if (intermediateFailures > 0) {
       warnings.push(`实时预览有 ${intermediateFailures} 次中间态导入失败（不影响最终结果）`);
     }
 
     // 5. Auto-create + fill copper zones after routing.
     // Strict gate: pour ONLY when every target net routed successfully.
-    let zonesFilled: number | undefined;
-    let zonesCreated: number | undefined;
+    let processedNets: readonly string[] | undefined;
+    let failedNets: readonly string[] | undefined;
     if (requested.fillZonesAfterRoute) {
       const unrouted = summary.unroutedNets;
       if (unrouted === undefined) {
@@ -400,14 +373,16 @@ export class RunService {
         try {
           const pourNets = requested.skipNets;
           const fillResult = await this.bridge.fillZones(pourNets, signal);
-          zonesCreated = fillResult.zonesCreated ?? 0;
-          zonesFilled = fillResult.zonesFilled ?? 0;
-          if (zonesCreated > 0) {
-            record(`自动创建铺铜：${pourNets.join(', ')} 共 ${zonesCreated} 个 zone`);
+          processedNets = fillResult.processedNets ?? [];
+          failedNets = fillResult.failedNets ?? [];
+          if (processedNets.length > 0) {
+            record(`铺铜处理：${processedNets.length} 个网络（${processedNets.slice(0, 8).join(', ')}${processedNets.length > 8 ? '…' : ''}）`);
           }
-          record(`铺铜完成：已填充 ${zonesFilled} 个铺铜区域`);
-          for (const message of fillResult.errors ?? []) {
-            warnings.push(`铺铜：${message}`);
+          if (failedNets.length > 0) {
+            record(`铺铜失败：${failedNets.length} 个网络（${failedNets.join(', ')}）`);
+          }
+          for (const net of failedNets) {
+            warnings.push(`铺铜失败：${net}`);
           }
         } catch (cause) {
           if (signal.aborted || (cause instanceof Error && cause.name === 'AbortError')) {
@@ -424,7 +399,7 @@ export class RunService {
     record(`布线完成，用时 ${Math.round(durationMs / 1000)} 秒`);
     record(describeRoutingSummary(summary, targetNets.length));
     record(
-      `导回 KiCad：${imported.tracks ?? ses.segments} 条走线 / ${imported.vias ?? ses.vias} 个过孔`,
+      `导回 KiCad：${ses.segments} 条走线 / ${ses.vias} 个过孔`,
     );
     if (refreshes > 0) {
       record(`实时刷新共 ${refreshes} 次`);
@@ -432,22 +407,21 @@ export class RunService {
 
     const routing: RoutingResult = {
       durationMs,
-      imported: imported.ok !== false,
+      imported: imported.success !== false,
       netCount: targetNets.length,
-      ...(verdict.outside === 0 ? {} : { outsideBoard: verdict.outside }),
       ...(refreshes === 0 ? {} : { refreshes }),
       ...(summary.routedNets === undefined ? {} : { routedNets: summary.routedNets }),
       ...(outcome.statistics === undefined ? {} : { statistics: outcome.statistics }),
-      tracks: imported.tracks ?? ses.segments,
+      tracks: ses.segments,
       ...(summary.unroutedNetNames === undefined
         ? {}
         : { unroutedNetNames: summary.unroutedNetNames }),
       ...(summary.unroutedNets === undefined ? {} : { unroutedNets: summary.unroutedNets }),
-      vias: imported.vias ?? ses.vias,
+      vias: ses.vias,
       ...(summary.violations === undefined ? {} : { violations: summary.violations }),
       ...(warnings.length === 0 ? {} : { warning: warnings.join('；') }),
-      ...(zonesFilled === undefined ? {} : { zonesFilled }),
-      ...(zonesCreated === undefined ? {} : { zonesCreated }),
+      ...(processedNets === undefined ? {} : { zonesFilled: processedNets.length }),
+      ...(failedNets === undefined ? {} : { zonesCreated: failedNets.length }),
     };
     return {
       content: new Uint8Array(sesBytes),

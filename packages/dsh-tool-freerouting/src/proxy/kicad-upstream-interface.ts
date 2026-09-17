@@ -4,59 +4,52 @@
  * `HqEdgeKicadClient` (hq-edge HTTP, the production path) satisfies this
  * contract so `RunService` can switch transports transparently.
  *
- * The types below use the same field shapes as the Bridge's JSON responses
- * (snake_case where the Bridge emits snake_case). TypeScript structural
- * typing ensures any implementation returning a compatible shape is accepted.
+ * The types below mirror the hq-edge HTTP JSON responses (camelCase where
+ * `toJson` emits camelCase). TypeScript structural typing ensures any
+ * implementation returning a compatible shape is accepted.
  *
  * @module proxy/kicad-upstream-interface
  */
 
 // ── Shared result types ──────────────────────────────────────────────────────
 
-/** Health / board-presence report from the KiCad upstream. */
+/**
+ * Health / host-status report from hq-edge.
+ *
+ * hq-edge `GET /api/v1/board/status` returns host identity and capability
+ * facts (not board-level details). `connected` is true when the EDA host is
+ * reachable; `pcbSupported` is true when the host advertises the PCB
+ * capability.
+ */
 export interface UpstreamStatus {
-  ok: boolean;
-  board_loaded?: boolean;
-  board_source?: string;
-  pcbnew_available?: boolean;
-}
-
-/** Post-import geometry self-check (board-outline containment). */
-export interface UpstreamImportGeometry {
-  board_bbox_mm?: [number, number, number, number] | null;
-  checked?: number;
-  mirrored?: boolean;
-  outside?: number;
-  session_bbox_mm?: [number, number, number, number] | null;
+  /** Whether the EDA host gRPC connection is alive. */
+  connected?: boolean;
+  /** Whether the host advertises the PCB layout capability. */
+  pcbSupported?: boolean;
+  /** Host identity and installation details (opaque). */
+  hostInfo?: Record<string, unknown>;
+  /** Raw capability list from the host (opaque enum values). */
+  capabilities?: unknown[];
+  /** Present when the request itself succeeded (BoardEnvelope compat). */
+  success?: boolean;
+  /** Present when the request failed (BoardEnvelope compat). */
+  errorMsg?: string;
 }
 
 /** Result of importing a routing session (SES) into KiCad. */
 export interface UpstreamImportResult {
-  ok: boolean;
-  error?: string;
-  geometry?: UpstreamImportGeometry;
-  method?: string;
-  tracks?: number;
-  vias?: number;
-}
-
-/** Result of reverting a previously imported session. */
-export interface UpstreamRevertResult {
-  ok: boolean;
-  error?: string;
-  removed?: number;
+  success: boolean;
+  errorMsg?: string;
 }
 
 /** Result of creating + filling copper zones. */
 export interface UpstreamFillZonesResult {
-  ok: boolean;
-  error?: string;
-  /** Per-net zone creation problems (non-fatal). */
-  errors?: string[];
-  /** Copper zones auto-created for the requested pour nets before filling. */
-  zonesCreated?: number;
-  /** Copper zones filled after routing. */
-  zonesFilled?: number;
+  success: boolean;
+  errorMsg?: string;
+  /** Nets whose copper pour was successfully processed. */
+  processedNets?: string[];
+  /** Nets whose copper pour failed. */
+  failedNets?: string[];
 }
 
 // ── The upstream client contract ─────────────────────────────────────────────
@@ -87,17 +80,12 @@ export interface KicadUpstreamClient {
 
   /**
    * Import a routing session (SES) from base64-encoded data.
-   * `purgeNets` lists nets whose leftover tracks/vias must be deleted first.
-   * Returns import statistics + geometry self-check.
+   * Returns import statistics.
    */
   importSession(
     sesBase64: string,
-    purgeNets?: readonly string[],
     signal?: AbortSignal,
   ): Promise<UpstreamImportResult>;
-
-  /** Roll back the tracks/vias added by the most recent `importSession`. */
-  revertSession(signal?: AbortSignal): Promise<UpstreamRevertResult>;
 
   /**
    * Auto-create copper zones for `nets` (default GND) on every copper layer,

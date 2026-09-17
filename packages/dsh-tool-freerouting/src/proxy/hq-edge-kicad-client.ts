@@ -16,7 +16,6 @@ import {
   type KicadUpstreamClient,
   type UpstreamFillZonesResult,
   type UpstreamImportResult,
-  type UpstreamRevertResult,
   type UpstreamStatus,
 } from './kicad-upstream-interface.js';
 import { UpstreamServiceError } from './upstream-errors.js';
@@ -35,8 +34,8 @@ export interface HqEdgeKicadClientOptions {
 }
 
 interface BoardEnvelope {
-  error?: string;
-  ok?: boolean;
+  errorMsg?: string;
+  success?: boolean;
 }
 
 /**
@@ -102,8 +101,8 @@ export class HqEdgeKicadClient implements KicadUpstreamClient {
     const payload = (await response.json().catch(() => undefined)) as T | undefined;
     if (!response.ok || payload === undefined) {
       const detail =
-        typeof (payload as BoardEnvelope | undefined)?.error === 'string'
-          ? (payload as BoardEnvelope).error
+        typeof (payload as BoardEnvelope | undefined)?.errorMsg === 'string'
+          ? (payload as BoardEnvelope).errorMsg
           : '';
       throw new UpstreamServiceError(
         'HQ_EDGE_REQUEST_FAILED',
@@ -125,34 +124,34 @@ export class HqEdgeKicadClient implements KicadUpstreamClient {
       {},
       signal,
     );
-    if (result.ok !== true) {
+    if (result.success !== true) {
       throw new UpstreamServiceError(
         'HQ_EDGE_BOARD_UNAVAILABLE',
         503,
-        result.error ?? 'KiCad has no open board to route; open a .kicad_pcb first',
+        result.errorMsg ?? 'KiCad has no open board to route; open a .kicad_pcb first',
       );
     }
   }
 
   /**
    * Export the current board as Specctra DSN via hq-edge.
-   * hq-edge returns `{ ok: true, dsn_base64: "..." }`.
+   * hq-edge returns `{ success, data: "..." }` (base64-encoded).
    */
   async exportDsn(signal?: AbortSignal): Promise<Buffer> {
-    const result = await this.request<BoardEnvelope & { dsn_base64?: string }>(
+    const result = await this.request<BoardEnvelope & { data?: string }>(
       'POST',
       '/api/v1/board/export-dsn',
       {},
       signal,
     );
-    if (result.ok !== true) {
+    if (result.success !== true) {
       throw new UpstreamServiceError(
         'HQ_EDGE_EXPORT_FAILED',
         502,
-        result.error ?? 'hq-edge could not export the board DSN',
+        result.errorMsg ?? 'hq-edge could not export the board DSN',
       );
     }
-    const base64 = result.dsn_base64 ?? '';
+    const base64 = result.data ?? '';
     if (base64 === '') {
       throw new UpstreamServiceError(
         'HQ_EDGE_EXPORT_EMPTY',
@@ -169,41 +168,20 @@ export class HqEdgeKicadClient implements KicadUpstreamClient {
    */
   async importSession(
     sesBase64: string,
-    purgeNets?: readonly string[],
     signal?: AbortSignal,
   ): Promise<UpstreamImportResult> {
-    const body: Record<string, unknown> = { ses_base64: sesBase64 };
-    if (purgeNets !== undefined && purgeNets.length > 0) {
-      body.purge_nets = [...purgeNets];
-    }
+    const body: Record<string, unknown> = { sesData: sesBase64 };
     const result = await this.request<UpstreamImportResult>(
       'POST',
       '/api/v1/board/import-session',
       body,
       signal,
     );
-    if (result.ok !== true) {
+    if (result.success !== true) {
       throw new UpstreamServiceError(
         'HQ_EDGE_IMPORT_FAILED',
         502,
-        result.error ?? 'hq-edge could not import the routing session',
-      );
-    }
-    return result;
-  }
-
-  async revertSession(signal?: AbortSignal): Promise<UpstreamRevertResult> {
-    const result = await this.request<UpstreamRevertResult>(
-      'POST',
-      '/api/v1/board/revert-session',
-      {},
-      signal,
-    );
-    if (result.ok !== true) {
-      throw new UpstreamServiceError(
-        'HQ_EDGE_REVERT_FAILED',
-        502,
-        result.error ?? 'hq-edge could not revert the imported routing session',
+        result.errorMsg ?? 'hq-edge could not import the routing session',
       );
     }
     return result;
@@ -220,11 +198,11 @@ export class HqEdgeKicadClient implements KicadUpstreamClient {
       body,
       signal,
     );
-    if (result.ok !== true) {
+    if (result.success !== true) {
       throw new UpstreamServiceError(
         'HQ_EDGE_FILL_ZONES_FAILED',
         502,
-        result.error ?? 'hq-edge could not fill the copper zones',
+        result.errorMsg ?? 'hq-edge could not fill the copper zones',
       );
     }
     return result;
