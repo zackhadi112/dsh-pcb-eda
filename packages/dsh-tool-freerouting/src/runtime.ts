@@ -54,7 +54,6 @@ export async function apply(ctx: Context, config: Config): Promise<() => void> {
     launchTimeoutMs: resolved.freeroutingLaunchTimeoutMs,
     pollIntervalMs: resolved.pollIntervalMs,
     probe: (signal) => freerouting.checkStatus(signal),
-    ...(resolved.freeroutingStartBat === '' ? {} : { startBatOverride: resolved.freeroutingStartBat }),
   });
   const runService = new RunService(ctx, runs, freerouting, bridge, launcher);
   const http = createRunHttpRuntime(runs, resolved.routePrefix);
@@ -82,5 +81,6 @@ export async function apply(ctx: Context, config: Config): Promise<() => void> {
     }
     runService.dispose();
     runs.dispose();
+    launcher.gracefulShutdown();
   };
 }
